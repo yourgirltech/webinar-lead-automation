@@ -1,0 +1,176 @@
+{
+  "name": "Webinar Lead Follow-up Sequence",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "3f8654f3-5ff6-462e-b355-919fb6dcd28a",
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -720,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ======================= CONFIG — EDIT ME =======================\nconst CONFIG = {\n  GHL_TOKEN: 'pit-REPLACE_WITH_PRIVATE_INTEGRATION_TOKEN', // GHL > Settings > Private Integrations\n  LOCATION_ID: 'REPLACE_WITH_LOCATION_ID',\n  // GHL custom field IDs (create them as Single Line TEXT fields)\n  FIELD_IDS: {\n    confirmationSent: 'REPLACE_webinar_confirmation_sent', // \"yes\" once confirmation is sent\n    sequenceStep:     'REPLACE_webinar_sequence_step',     // number of follow-ups already sent\n    nextSendAt:       'REPLACE_webinar_next_send_at',      // ISO date of next follow-up\n    lastSentAt:       'REPLACE_webinar_last_sent_at',      // ISO date of last email sent\n  },\n  REGISTERED_TAG: 'webinar-registered',\n};\nconst GHL = 'https://services.leadconnectorhq.com';\nconst ghlHeaders = {\n  Authorization: `Bearer ${CONFIG.GHL_TOKEN}`,\n  Version: '2021-07-28',\n  Accept: 'application/json',\n  'Content-Type': 'application/json',\n};\n// ================================================================\n\nconst STOP_TAGS = ['unsubscribed', 'do-not-email', 'webinar-sequence-complete', 'webinar-sequence-failed'];\nconst MAX_PER_RUN = 40;   // keeps you well under Gmail sending limits\nconst HOST = 'Nike';\nconst LINKS = {\n  replay: 'https://your-replay-link.com',\n  booking: 'https://your-booking-link.com',\n  resource: 'https://your-resource-link.com',\n};\n\nconst wrap = (inner) => `<div style=\"font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#222;line-height:1.6\">${inner}<p>— ${HOST}</p><p style=\"font-size:12px;color:#888\">Reply \"stop\" and I won't email you about this again.</p></div>`;\nconst btn = (href, label) => `<p style=\"margin:22px 0\"><a href=\"${href}\" style=\"background:#ff6d2d;color:#fff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:bold\">${label}</a></p>`;\n\n// Each step: email content + hours to wait AFTER sending it before the next step.\n// Step 1 fires FIRST_FOLLOWUP_DELAY_HOURS after the confirmation (set in the Confirmation workflow).\nconst SEQUENCE = [\n  {\n    subject: (n) => `${n}, a quick resource before we go live`,\n    html: (n) => wrap(`<p>Hi ${n},</p><p>To get the most out of the webinar, have a look at this short resource beforehand.</p>${btn(LINKS.resource, 'Get the resource')}`),\n    waitAfterHours: 48,\n  },\n  {\n    subject: (n) => `The replay + key takeaways`,\n    html: (n) => wrap(`<p>Hi ${n},</p><p>Whether you made it live or not, here's the full replay and the key takeaways.</p>${btn(LINKS.replay, 'Watch the replay')}`),\n    waitAfterHours: 72,\n  },\n  {\n    subject: (n) => `Want help putting this into action, ${n}?`,\n    html: (n) => wrap(`<p>Hi ${n},</p><p>If you'd like help applying what we covered to your business, grab a free call slot below.</p>${btn(LINKS.booking, 'Book a call')}`),\n    waitAfterHours: 0,\n  },\n];\n\n// ---- Fetch tagged contacts from GHL (paginated) ----\nlet contacts = [];\nfor (let page = 1; page <= 10; page++) {\n  const res = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${GHL}/contacts/search`,\n    headers: ghlHeaders,\n    body: {\n      locationId: CONFIG.LOCATION_ID,\n      page,\n      pageLimit: 100,\n      filters: [{ field: 'tags', operator: 'contains', value: CONFIG.REGISTERED_TAG }],\n    },\n    json: true,\n  });\n  const batch = res.contacts || [];\n  contacts.push(...batch);\n  if (batch.length < 100) break;\n}\n\nconst sd = $getWorkflowStaticData('global');\nsd.sent = sd.sent || {};\nconst now = Date.now();\nconst field = (c, id) => (c.customFields || []).find(f => f.id === id)?.value;\n\nconst leads = [];\nfor (const c of contacts) {\n  const tags = (c.tags || []).map(t => String(t).toLowerCase());\n  if (!tags.includes(CONFIG.REGISTERED_TAG)) continue;          // safety net if filter is ignored\n  if (STOP_TAGS.some(t => tags.includes(t))) continue;\n  if (c.dnd) continue;\n\n  const email = (c.email || '').toLowerCase();\n  if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) continue;\n\n  const step = parseInt(field(c, CONFIG.FIELD_IDS.sequenceStep) ?? '', 10);\n  const nextSendAt = field(c, CONFIG.FIELD_IDS.nextSendAt);\n  if (Number.isNaN(step) || !nextSendAt) continue;               // not enrolled yet\n  if (step >= SEQUENCE.length) continue;                          // finished\n  if (new Date(nextSendAt).getTime() > now) continue;             // not due yet\n  if (sd.sent[`${c.id}:${step}`]) continue;                       // already sent this step\n\n  const s = SEQUENCE[step];\n  const name = c.firstName || 'there';\n  const isLastStep = step === SEQUENCE.length - 1;\n\n  leads.push({\n    hasLeads: true,\n    contactId: c.id,\n    email,\n    firstName: c.firstName || '',\n    step,\n    stepNumber: step + 1,\n    subject: s.subject(name),\n    html: s.html(name),\n    isLastStep,\n    nextSendAtAfterSend: isLastStep ? '' : new Date(now + s.waitAfterHours * 3600e3).toISOString(),\n  });\n  if (leads.length >= MAX_PER_RUN) break;\n}\n\nif (!leads.length) return [{ json: { hasLeads: false, checked: contacts.length } }];\nreturn leads.map(l => ({ json: l }));\n"
+      },
+      "id": "15df0ffc-2f79-4727-ba86-09911301b932",
+      "name": "Build Send List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8aac17bc-d0cf-467c-ba24-7fac54dc41f9",
+              "leftValue": "={{ $json.hasLeads }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d95de58e-62c3-42e6-98cd-10fa99f61cf0",
+      "name": "IF Has Leads",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Nike"
+        }
+      },
+      "id": "3348bd22-a37d-48f3-9121-723ee5932bf9",
+      "name": "Gmail — Send Webinar Followup",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "dad44004-998d-4c15-b759-48f7db66a745",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ======================= CONFIG — EDIT ME =======================\nconst CONFIG = {\n  GHL_TOKEN: 'pit-REPLACE_WITH_PRIVATE_INTEGRATION_TOKEN', // GHL > Settings > Private Integrations\n  LOCATION_ID: 'REPLACE_WITH_LOCATION_ID',\n  // GHL custom field IDs (create them as Single Line TEXT fields)\n  FIELD_IDS: {\n    confirmationSent: 'REPLACE_webinar_confirmation_sent', // \"yes\" once confirmation is sent\n    sequenceStep:     'REPLACE_webinar_sequence_step',     // number of follow-ups already sent\n    nextSendAt:       'REPLACE_webinar_next_send_at',      // ISO date of next follow-up\n    lastSentAt:       'REPLACE_webinar_last_sent_at',      // ISO date of last email sent\n  },\n  REGISTERED_TAG: 'webinar-registered',\n};\nconst GHL = 'https://services.leadconnectorhq.com';\nconst ghlHeaders = {\n  Authorization: `Bearer ${CONFIG.GHL_TOKEN}`,\n  Version: '2021-07-28',\n  Accept: 'application/json',\n  'Content-Type': 'application/json',\n};\n// ================================================================\n\nconst COMPLETE_TAG = 'webinar-sequence-complete';\nconst FAILED_TAG = 'webinar-sequence-failed';\nconst MAX_FAILURES = 3;\n\nconst sd = $getWorkflowStaticData('global');\nsd.sent = sd.sent || {};\nsd.failures = sd.failures || {};\nconst nowIso = new Date().toISOString();\n\n// prune sent log older than 60 days\nfor (const [k, ts] of Object.entries(sd.sent)) {\n  if (Date.now() - new Date(ts).getTime() > 60 * 24 * 3600e3) delete sd.sent[k];\n}\n\nconst addTag = (id, tag) => this.helpers.httpRequest({\n  method: 'POST', url: `${GHL}/contacts/${id}/tags`, headers: ghlHeaders, body: { tags: [tag] }, json: true,\n});\n\nconst out = [];\nconst items = $input.all();\n\nfor (let i = 0; i < items.length; i++) {\n  const g = items[i].json;\n  let lead;\n  try { lead = $('Build Send List').itemMatching(i).json; }\n  catch { lead = $('Build Send List').all()[i].json; }\n\n  const key = `${lead.contactId}:${lead.step}`;\n\n  // Gmail failed for this lead → leave fields untouched so it retries next run\n  if (g.error) {\n    sd.failures[lead.contactId] = (sd.failures[lead.contactId] || 0) + 1;\n    let tagged = false;\n    if (sd.failures[lead.contactId] >= MAX_FAILURES) {\n      try { await addTag(lead.contactId, FAILED_TAG); tagged = true; } catch {}\n    }\n    out.push({ json: { contactId: lead.contactId, email: lead.email, step: lead.stepNumber,\n      status: 'send_failed', failures: sd.failures[lead.contactId], taggedFailed: tagged,\n      error: String(g.error?.message ?? g.error) } });\n    continue;\n  }\n\n  sd.sent[key] = nowIso;\n  delete sd.failures[lead.contactId];\n\n  let ghlUpdated = false, ghlError = null;\n  try {\n    await this.helpers.httpRequest({\n      method: 'PUT',\n      url: `${GHL}/contacts/${lead.contactId}`,\n      headers: ghlHeaders,\n      body: {\n        customFields: [\n          { id: CONFIG.FIELD_IDS.sequenceStep, field_value: String(lead.step + 1) },\n          { id: CONFIG.FIELD_IDS.lastSentAt, field_value: nowIso },\n          { id: CONFIG.FIELD_IDS.nextSendAt, field_value: lead.nextSendAtAfterSend },\n        ],\n      },\n      json: true,\n    });\n    if (lead.isLastStep) await addTag(lead.contactId, COMPLETE_TAG);\n    ghlUpdated = true;\n  } catch (e) {\n    ghlError = e.message;\n  }\n\n  out.push({ json: { contactId: lead.contactId, email: lead.email, step: lead.stepNumber,\n    status: 'sent', messageId: g.id || null, completed: lead.isLastStep, ghlUpdated, ghlError } });\n}\n\nreturn out;\n"
+      },
+      "id": "dd3b753f-f0e4-40f8-bd99-f122eda053ca",
+      "name": "Write Back Sequence Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "bde4adca-cd0f-421b-bc2d-8abfe179185d",
+      "name": "No Leads — Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        0,
+        224
+      ]
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Build Send List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Send List": {
+      "main": [
+        [
+          {
+            "node": "IF Has Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has Leads": {
+      "main": [
+        [
+          {
+            "node": "Gmail — Send Webinar Followup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Leads — Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail — Send Webinar Followup": {
+      "main": [
+        [
+          {
+            "node": "Write Back Sequence Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "active": false
+}
