@@ -2,8 +2,6 @@
 
 Two n8n workflows that run the email side of a webinar funnel on top of GoHighLevel (GHL): an instant registration confirmation, and a scheduled follow-up sequence. Both keep their state on the GHL contact, so a contact never gets the same email twice, even across retries and restarts.
 
-> **In production for a client.** The live system runs on the client's own domain and isn't linked here. This repository is the build record: the full source, with client data, credentials and URLs removed.
-
 ## Workflows
 
 ### Webinar Confirmation Email — `n8n/webinar-confirmation-email.json`
