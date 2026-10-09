@@ -1,0 +1,263 @@
+{
+  "name": "Webinar Confirmation Email",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "webinar-confirmation",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "e9c370c1-55e0-4c45-b867-8aa4bb6d12c9",
+      "name": "Webhook — /webinar-confirmation",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        112
+      ],
+      "webhookId": "1af4ef5e-7fa1-4910-8c84-5fc4e44c17b9"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ======================= CONFIG — EDIT ME =======================\nconst CONFIG = {\n  GHL_TOKEN: 'pit-REPLACE_WITH_PRIVATE_INTEGRATION_TOKEN', // GHL > Settings > Private Integrations\n  LOCATION_ID: 'REPLACE_WITH_LOCATION_ID',\n  // GHL custom field IDs (create them as Single Line TEXT fields)\n  FIELD_IDS: {\n    confirmationSent: 'REPLACE_webinar_confirmation_sent', // \"yes\" once confirmation is sent\n    sequenceStep:     'REPLACE_webinar_sequence_step',     // number of follow-ups already sent\n    nextSendAt:       'REPLACE_webinar_next_send_at',      // ISO date of next follow-up\n    lastSentAt:       'REPLACE_webinar_last_sent_at',      // ISO date of last email sent\n  },\n  REGISTERED_TAG: 'webinar-registered',\n};\nconst GHL = 'https://services.leadconnectorhq.com';\nconst ghlHeaders = {\n  Authorization: `Bearer ${CONFIG.GHL_TOKEN}`,\n  Version: '2021-07-28',\n  Accept: 'application/json',\n  'Content-Type': 'application/json',\n};\n// ================================================================\n\nconst WEBINAR = {\n  title: 'Your Webinar Title',\n  dateText: 'Thursday, 2 October 2026 · 4:00 PM (WAT)',\n  joinLink: 'https://your-webinar-link.com',\n  hostName: 'Nike',\n};\nconst DEDUP_WINDOW_HOURS = 24;\n\nconst raw = $input.first().json;\nconst body = raw.body ?? raw;\nconst cd = body.customData || body.custom_data || {};\nconst pick = (...v) => (v.find(x => typeof x === 'string' && x.trim()) || '').trim();\n\nlet contactId = pick(body.contact_id, body.contactId, body.contact?.id, cd.contact_id);\nlet email = pick(body.email, body.contact?.email, cd.email).toLowerCase();\nlet firstName = pick(body.first_name, body.firstName, body.contact?.firstName, cd.first_name);\nlet lastName = pick(body.last_name, body.lastName, body.contact?.lastName, cd.last_name);\nlet customFields = [];\nlet lookupError = null;\n\n// ---- Resolve contact from GHL (fills gaps + reads guard field) ----\ntry {\n  if (contactId) {\n    const res = await this.helpers.httpRequest({\n      method: 'GET', url: `${GHL}/contacts/${contactId}`, headers: ghlHeaders, json: true,\n    });\n    const c = res.contact || {};\n    email = email || (c.email || '').toLowerCase();\n    firstName = firstName || c.firstName || '';\n    lastName = lastName || c.lastName || '';\n    customFields = c.customFields || [];\n  } else if (email) {\n    const res = await this.helpers.httpRequest({\n      method: 'GET',\n      url: `${GHL}/contacts/search/duplicate?locationId=${CONFIG.LOCATION_ID}&email=${encodeURIComponent(email)}`,\n      headers: ghlHeaders, json: true,\n    });\n    const c = res.contact || {};\n    contactId = c.id || '';\n    firstName = firstName || c.firstName || '';\n    lastName = lastName || c.lastName || '';\n    customFields = c.customFields || [];\n  }\n} catch (e) {\n  lookupError = e.message; // continue — static-data guard still protects us\n}\n\nconst base = { contactId, email, firstName, lastName, fullName: `${firstName} ${lastName}`.trim(), lookupError };\nconst stop = (reason) => [{ json: { process: false, reason, ...base } }];\n\n// ---- Validate ----\nif (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) return stop('invalid_email');\n\n// ---- Guard 1: GHL field ----\nconst sentFlag = customFields.find(f => f.id === CONFIG.FIELD_IDS.confirmationSent)?.value;\nif (String(sentFlag || '').toLowerCase() === 'yes') return stop('already_sent');\n\n// ---- Guard 2: n8n static data (catches rapid duplicate webhooks) ----\nconst sd = $getWorkflowStaticData('global');\nsd.confirmations = sd.confirmations || {};\nconst now = Date.now();\nfor (const [k, ts] of Object.entries(sd.confirmations)) {\n  if (now - new Date(ts).getTime() > 30 * 24 * 3600e3) delete sd.confirmations[k];\n}\nconst key = contactId || email;\nconst last = sd.confirmations[key];\nif (last && now - new Date(last).getTime() < DEDUP_WINDOW_HOURS * 3600e3) return stop('duplicate_recent');\n\n// ---- Build email ----\nconst name = firstName || 'there';\nconst subject = `You're in! ${WEBINAR.title} — ${WEBINAR.dateText}`;\nconst html = `\n<div style=\"font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#222;line-height:1.6\">\n  <h2 style=\"margin-bottom:4px\">You're registered, ${name}! 🎉</h2>\n  <p>Thanks for signing up for <b>${WEBINAR.title}</b>.</p>\n  <p><b>When:</b> ${WEBINAR.dateText}</p>\n  <p style=\"margin:24px 0\">\n    <a href=\"${WEBINAR.joinLink}\" style=\"background:#ff6d2d;color:#fff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:bold\">Join the webinar</a>\n  </p>\n  <p>Add it to your calendar so you don't miss it. I'll send you a few helpful emails before and after the session.</p>\n  <p>See you there,<br>${WEBINAR.hostName}</p>\n</div>`;\n\nreturn [{ json: { process: true, reason: 'ok', ...base, dedupKey: key, subject, html, webinar: WEBINAR } }];\n"
+      },
+      "id": "3c611810-9f32-4c03-940f-437015042881",
+      "name": "Validate + Resolve Contact + Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e69d6fc5-79f3-4213-84d9-36605d322bfe",
+              "leftValue": "={{ $json.process }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "adef89d9-7e9f-4c42-9518-2d8bff04e8f2",
+      "name": "IF process",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Nike"
+        }
+      },
+      "id": "3363dd74-c767-4e9a-baec-d3dfc5afae82",
+      "name": "Gmail — Send Confirmation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "ff2a82fd-52df-496b-8e4d-adf50730c372",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ======================= CONFIG — EDIT ME =======================\nconst CONFIG = {\n  GHL_TOKEN: 'pit-REPLACE_WITH_PRIVATE_INTEGRATION_TOKEN', // GHL > Settings > Private Integrations\n  LOCATION_ID: 'REPLACE_WITH_LOCATION_ID',\n  // GHL custom field IDs (create them as Single Line TEXT fields)\n  FIELD_IDS: {\n    confirmationSent: 'REPLACE_webinar_confirmation_sent', // \"yes\" once confirmation is sent\n    sequenceStep:     'REPLACE_webinar_sequence_step',     // number of follow-ups already sent\n    nextSendAt:       'REPLACE_webinar_next_send_at',      // ISO date of next follow-up\n    lastSentAt:       'REPLACE_webinar_last_sent_at',      // ISO date of last email sent\n  },\n  REGISTERED_TAG: 'webinar-registered',\n};\nconst GHL = 'https://services.leadconnectorhq.com';\nconst ghlHeaders = {\n  Authorization: `Bearer ${CONFIG.GHL_TOKEN}`,\n  Version: '2021-07-28',\n  Accept: 'application/json',\n  'Content-Type': 'application/json',\n};\n// ================================================================\n\n// Must match the first follow-up delay you want in the sequence workflow\nconst FIRST_FOLLOWUP_DELAY_HOURS = 24;\n\nconst c = $('Validate + Resolve Contact + Guard').first().json;\nconst gmail = $input.first().json;\nconst now = new Date();\nconst nextSendAt = new Date(now.getTime() + FIRST_FOLLOWUP_DELAY_HOURS * 3600e3).toISOString();\n\nlet ghlUpdated = false;\nlet ghlError = null;\n\nif (c.contactId) {\n  try {\n    await this.helpers.httpRequest({\n      method: 'PUT',\n      url: `${GHL}/contacts/${c.contactId}`,\n      headers: ghlHeaders,\n      body: {\n        customFields: [\n          { id: CONFIG.FIELD_IDS.confirmationSent, field_value: 'yes' },\n          { id: CONFIG.FIELD_IDS.sequenceStep, field_value: '0' },\n          { id: CONFIG.FIELD_IDS.nextSendAt, field_value: nextSendAt },\n          { id: CONFIG.FIELD_IDS.lastSentAt, field_value: now.toISOString() },\n        ],\n      },\n      json: true,\n    });\n    await this.helpers.httpRequest({\n      method: 'POST',\n      url: `${GHL}/contacts/${c.contactId}/tags`,\n      headers: ghlHeaders,\n      body: { tags: [CONFIG.REGISTERED_TAG] },\n      json: true,\n    });\n    ghlUpdated = true;\n  } catch (e) {\n    ghlError = e.message;\n  }\n} else {\n  ghlError = 'no_contact_id';\n}\n\n// Local guard so retries/duplicate webhooks don't re-send\nconst sd = $getWorkflowStaticData('global');\nsd.confirmations = sd.confirmations || {};\nsd.confirmations[c.dedupKey] = now.toISOString();\n\nreturn [{\n  json: {\n    contactId: c.contactId,\n    email: c.email,\n    fullName: c.fullName || c.email,\n    webinarTitle: c.webinar?.title,\n    messageId: gmail.id || null,\n    confirmedAt: now.toISOString(),\n    nextSendAt,\n    ghlUpdated,\n    ghlError,\n  },\n}];\n"
+      },
+      "id": "0c34a50b-b216-4d9e-866e-8c29aa2609b5",
+      "name": "Write GHL Guard Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "team@yourdomain.com",
+        "subject": "=New webinar registration: {{ $json.fullName }}",
+        "message": "=<p><b>New registration</b> for {{ $json.webinarTitle }}</p><p>Name: {{ $json.fullName }}<br>Email: {{ $json.email }}<br>GHL contact: {{ $json.contactId }}<br>GHL updated: {{ $json.ghlUpdated }}{{ $json.ghlError ? '<br>GHL error: ' + $json.ghlError : '' }}</p>",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "Webinar Bot"
+        }
+      },
+      "id": "3dc24be0-ebb3-4f6e-a5c4-56f41c75fa47",
+      "name": "Team Notification — New Registration",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        112
+      ],
+      "webhookId": "a3083499-c51d-480f-bf0b-c2e92504b967",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'confirmation_sent', email: $('Write GHL Guard Fields').first().json.email, messageId: $('Write GHL Guard Fields').first().json.messageId, ghlUpdated: $('Write GHL Guard Fields').first().json.ghlUpdated }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "3923bb9e-c5e6-45f1-b103-793bbf2659fc",
+      "name": "Respond 200 (confirmation_sent)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'error', reason: 'gmail_failed', error: String($json.error?.message ?? $json.error ?? 'unknown') }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "126af992-4408-4e92-90d1-6928959feaa4",
+      "name": "Respond 500 (Gmail failed)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'ignored', reason: $json.reason, email: $json.email }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "ba648a74-f021-4fdc-97fd-74ac5b445788",
+      "name": "Respond (invalid/ignored)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        240
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook — /webinar-confirmation": {
+      "main": [
+        [
+          {
+            "node": "Validate + Resolve Contact + Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate + Resolve Contact + Guard": {
+      "main": [
+        [
+          {
+            "node": "IF process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF process": {
+      "main": [
+        [
+          {
+            "node": "Gmail — Send Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond (invalid/ignored)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail — Send Confirmation": {
+      "main": [
+        [
+          {
+            "node": "Write GHL Guard Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 500 (Gmail failed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write GHL Guard Fields": {
+      "main": [
+        [
+          {
+            "node": "Team Notification — New Registration",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Team Notification — New Registration": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 (confirmation_sent)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "active": false
+}
